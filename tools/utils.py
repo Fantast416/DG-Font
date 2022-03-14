@@ -36,6 +36,7 @@ def save_checkpoint(state, check_list, log_dir, epoch=0):
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
+    # 计算一个epoch的平均损失，即将每个样本的损失取一下平均。
     def __init__(self):
         self.reset()
 

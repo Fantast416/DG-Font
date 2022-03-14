@@ -15,7 +15,7 @@ cfg = {
     'vgg19cut': [64, 64, 'M', 128, 128, 'M', 256, 256, 256, 256, 'M', 512, 512, 512, 512, 'M', 512, 512, 512, 512, 'N'],
 }
 
-
+# StyleEncoder
 class GuidingNet(nn.Module):
     def __init__(self, img_size=64, output_k={'cont': 128, 'disc': 10}):
         super(GuidingNet, self).__init__()

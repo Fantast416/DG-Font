@@ -1,3 +1,5 @@
+#coding=gbk
+from copyreg import constructor
 from torch import nn
 import torch
 import torch.nn.functional as F
@@ -17,50 +19,79 @@ from modules import modulated_deform_conv
 
 class Generator(nn.Module):   
     def __init__(self, img_size=80, sty_dim=64, n_res=2, use_sn=False):
+        """
+
+        :param img_size: 输入的图像大小，但是在此份代码中毫无意义，没有被使用
+        :param sty_dim: 字体风格向量的大小——Zs的维度
+        :param n_res: 默认为2， ResBlock的数量
+        :param use_sn: 是否使用sn
+        """
         super(Generator, self).__init__()
         print("Init Generator")
 
-        self.nf = 64 
+        self.nf = 64
         self.nf_mlp = 256
 
-        self.decoder_norm = 'adain'
+        self.decoder_norm = 'adain' # 在此处设置decoder_norm的类型，后续传入Decoder类中
 
-        self.adaptive_param_getter = get_num_adain_params
-        self.adaptive_param_assign = assign_adain_params
+        self.adaptive_param_getter = get_num_adain_params # 设置计算函数
+        self.adaptive_param_assign = assign_adain_params #设置赋值函数
 
         print("GENERATOR NF : ", self.nf)
 
-        s0 = 16
+        # s0 = 16 # ？ 这个参数里面好像都没有用到
         n_downs = 2
-        nf_dec = 256
+        nf_dec = 256 # nf_dec decoder中输入的特征图的数量
 
+        # ContentEncoder的目的是得到Skip1，Skip2和Zc
         self.cnt_encoder = ContentEncoder(self.nf, n_downs, n_res, 'in', 'relu', 'reflect')
+        # Decoder是论文中的Mixer，目的是
         self.decoder = Decoder(nf_dec, sty_dim, n_downs, n_res, self.decoder_norm, self.decoder_norm, 'relu', 'reflect', use_sn=use_sn)
         self.mlp = MLP(sty_dim, self.adaptive_param_getter(self.decoder), self.nf_mlp, 3, 'none', 'relu')
 
         self.apply(weights_init('kaiming'))
 
     def forward(self, x_src, s_ref):
+        # Generator中的前向传播，输入是内容图像，以及参考的风格图像
+        # 先是内容图像经过Content Encoder，得到Zc,skip1,skip2
         c_src, skip1, skip2 = self.cnt_encoder(x_src)
+        # 然后将调用解码函数，输入为内容Zc,skip1,skip2以及参考的风格图像   ,所以原论文中的Style Encoder其实在代码实现的时候，合进了DECODER中书写
         x_out = self.decode(c_src, s_ref, skip1, skip2)
+        # 最终输出的就是 [B,3,80,80] 生成图像
         return x_out
 
     def decode(self, cnt, sty, skip1, skip2):
+        # 在解码的函数中，首先对参考的风格特征（这个特征在外层，是由Gudingnet部分对StyleImage处理得到的）经过ＭＬＰ层，获得参数
         adapt_params = self.mlp(sty)
-        self.adaptive_param_assign(adapt_params, self.decoder)
+        # print(f"adapt_params.shape:{adapt_params.shape}") # [32,2342] 个参数
+        self.adaptive_param_assign(adapt_params, self.decoder) # 将DECODER中的ADAIN2D模块的参数进行赋值
+        # 得到输出，将内容图像、skip1、skip2通过Decoder的Forward，得到输出
         out = self.decoder(cnt, skip1, skip2)
+        # print(f"out[0].shape:{out[0].shape}") # [32,3,80,80]
         return out
 
     def _initialize_weights(self, mode='fan_in'):
+        
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode=mode, nonlinearity='relu')
                 if m.bias is not None:
                     m.bias.data.zero_()
 
-
-class Decoder(nn.Module):
+class Decoder(nn.Module): # 论文中的 Mixer
     def __init__(self, nf_dec, sty_dim, n_downs, n_res, res_norm, dec_norm, act, pad, use_sn=False):
+        """
+        Args:
+            nf_dec ([type]): [输入的特征图数量]
+            sty_dim ([type]): [无效参数]
+            n_downs ([type]): [无效参数]
+            n_res ([type]): [残差块的数目]
+            res_norm ([type]): [在ResBlock中用的Norm函数]
+            dec_norm ([type]): [在Decoder的Conv2dBlock中用的Norm函数]
+            act ([type]): [激活函数]
+            pad ([type]): [padding类型]
+            use_sn (bool, optional): [description]. Defaults to False.
+        """
         super(Decoder, self).__init__()
         print("Init Decoder")
 
@@ -82,13 +113,17 @@ class Decoder(nn.Module):
         self.dcn_2 = modulated_deform_conv.ModulatedDeformConvPack(128, 128, kernel_size=(3, 3), stride=1, padding=1, groups=1, deformable_groups=1, double=True).cuda()
 
     def forward(self, x, skip1, skip2):
+        
         output = x
         for i in range(len(self.model)):
             output = self.model[i](output)
 
             if i == 2: 
-                deformable_concat = torch.cat((output,skip2), dim=1)
+                deformable_concat = torch.cat((output,skip2), dim=1)    #将卷积层输出的output，和skip2的内容 在channel维度concat起来
+                # print(f"deformable_concat.shape{deformable_concat.shape}")
                 concat_pre, offset2 = self.dcn_2(deformable_concat, skip2)
+                # print(f"concat_pre.shape{concat_pre.shape}")
+                # print(f"offset2.shape{offset2.shape}")
                 output = torch.cat((concat_pre,output), dim=1)
 
             if i == 4:
@@ -96,19 +131,33 @@ class Decoder(nn.Module):
                 concat_pre, offset1 = self.dcn(deformable_concat, skip1)
                 output = torch.cat((concat_pre,output), dim=1)
             
+        # ? 这一步是在干什么？需要查看外层代码
         offset_sum1 = torch.mean(torch.abs(offset1))
         offset_sum2 = torch.mean(torch.abs(offset2))
         offset_sum = (offset_sum1+offset_sum2)/2
         return output, offset_sum
 
-
 class ContentEncoder(nn.Module):
+    """
+        变形卷积 + IN + ReLU  得到Skip1
+        变形卷积 + IN + ReLU  得到Skip2
+        变形卷积 + IN + ReLU + N个ResBlock叠加  得到输出Zc
+    """
     def __init__(self, nf_cnt, n_downs, n_res, norm, act, pad, use_sn=False):
+        """
+        Args:
+            nf_cnt ([type]): [无效参数]
+            n_downs ([type]): [无效参数]
+            n_res ([type]): [ResBlock的数量]
+            norm ([type]): [norm使用的方法]
+            act ([type]): [使用的激活函数]
+            pad ([type]): [使用的padding类型]
+            use_sn (bool, optional): [description]. Defaults to False.
+        """
         super(ContentEncoder, self).__init__()
         print("Init ContentEncoder")
 
-        nf = nf_cnt
-
+        # nf = nf_cnt
         self.model = nn.ModuleList()
         self.model.append(ResBlocks(n_res, 256, norm=norm, act=act, pad_type=pad, use_sn=use_sn))
         self.model = nn.Sequential(*self.model)
@@ -121,20 +170,27 @@ class ContentEncoder(nn.Module):
         self.activation = nn.ReLU(inplace=True)
 
     def forward(self, x):
-        x, _ = self.dcn1(x, x)
-        x = self.IN1(x)
-        x = self.activation(x)
-        skip1 = x
+        print("Content Encoder,input size",x.size())  # 输入为 [B,C,H,W]
+        # 以下每一行注释标注的大小，都是经过改行代码后输出的Tensor大小
+        x, _ = self.dcn1(x, x)  # [B,64,H,W] DCN1的kernel_size和padding保证了其不会改变特征图的大小，只变化了特征图的通道数
+        x = self.IN1(x)   # [B,64,H,W] InstanceNorm不会改变特征图大小和通道数
+        x = self.activation(x)  # [B,64,H,W]
+        skip1 = x  # [B,64,H,W]
         
-        x, _ = self.dcn2(x, x)
-        x = self.IN2(x)
-        x = self.activation(x)
-        skip2 = x
+        x, _ = self.dcn2(x, x)  # [B,128,H/2,W/2]
+        x = self.IN2(x)  # [B,128,H/2,W/2]
+        x = self.activation(x)  # [B,128,H/2,W/2]
+        skip2 = x  # [B,128,H/2,W/2]
 
-        x, _ = self.dcn3(x, x)
-        x = self.IN3(x)
-        x = self.activation(x)
-        x = self.model(x)
+        x, _ = self.dcn3(x, x)  # [B,256,H/4,W/4]
+        x = self.IN3(x)  # [B,256,H/4,W/4]
+        x = self.activation(x)  # [B,256,H/4,W/4]
+        x = self.model(x) # 经过两组ResBlock + IN ，最终输出的Tensor为 [B,256,H/4,W/4]
+
+        # 假设输入的图像大小为 80 * 80
+        # print(f"skip1.shape:{skip1.shape}") # [32,64,80,80]
+        # print(f"skip2.shape:{skip2.shape}") # [32,128,40,40]
+        # print(f"x.shape:{x.shape}")         # [32,256,20,20]
         return x, skip1, skip2
 
 class MLP(nn.Module):

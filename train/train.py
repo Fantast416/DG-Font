@@ -10,7 +10,19 @@ from tools.ops import compute_grad_gp, update_average, copy_norm_params, queue_d
 
 
 def trainGAN(data_loader, networks, opts, epoch, args, additional):
-    # avg meter
+    """
+    训练核心函数
+    :param data_loader: 训练集的数据加载器 DataLoader类
+    :param networks: 网络 字典，包含  C、C_EMA、D、G，字典的key 都是 nn.Module
+    :param opts: 使用的优化器字典，同上
+    :param epoch: 当前处于的轮次
+    :param args: 外层传入的参数
+    :param additional: 额外参数，外层传入的是logger
+    :return:
+    """
+    # AverageMeter类用于计算 某个变量指标 在一个epoch中的平均值
+    # reset成员函数用于重置内部变量
+    # update成员函数，用于更新变量的存储记录值
     d_losses = AverageMeter()
     d_advs = AverageMeter()
     d_gps = AverageMeter()
@@ -28,10 +40,12 @@ def trainGAN(data_loader, networks, opts, epoch, args, additional):
     C = networks['C'] if not args.distributed else networks['C'].module
     G_EMA = networks['G_EMA'] if not args.distributed else networks['G_EMA'].module
     C_EMA = networks['C_EMA'] if not args.distributed else networks['C_EMA'].module
+
     # set opts
     d_opt = opts['D']
     g_opt = opts['G']
     c_opt = opts['C']
+
     # switch to train mode
     D.train()
     G.train()
@@ -43,27 +57,46 @@ def trainGAN(data_loader, networks, opts, epoch, args, additional):
 
 
     # summary writer
+    # dataloader本质上是一个可迭代对象，可以使用iter()进行访问，采用iter(dataloader)返回的是一个迭代器，然后可以使用next()访问。返回的是一个批次的数据
     train_it = iter(data_loader)
 
+    # args.iters 为参数控制传入的 每个Epoch迭代梯度下降参数更新的次数
     t_train = trange(0, args.iters, initial=0, total=args.iters)
 
-    for i in t_train:
+    # trange 同python中的range,区别在于trange在循环执行的时候会输出打印进度条,最后的 5.00s/it 代表每次循环耗时5s
+    """
+     0%|                                                                                            | 0/3 [00:00<?, ?it/s]
+    第1次执行
+     33%|████████████████████████████                                                        | 1/3 [00:05<00:10,  5.00s/it]
+    第2次执行
+     67%|████████████████████████████████████████████████████████                            | 2/3 [00:10<00:05,  5.00s/it]
+    第3次执行
+    100%|████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:15<00:00,  5.01s/it]
+    ————————————————
+    """
+
+    for i in t_train: # 最外层循环
         try:
-            imgs, y_org = next(train_it)
+            imgs, y_org = next(train_it)  # 获取一个Batch的数据
         except:
             train_it = iter(data_loader)
             imgs, y_org = next(train_it)
 
         x_org = imgs
 
+        # x_org 原始样本 y_org 原始标签
+        # x_org.size() : [B,C,W,H]  BatchSize,Channel,Width,Height
+        # x_org.size(0) = BatchSize
 
+        # 返回一个 0-BatchSize 打乱顺序的数组 x_ref_idx
         x_ref_idx = torch.randperm(x_org.size(0))
 
+        # 将数据拷贝至GPU中
         x_org = x_org.cuda(args.gpu)
-
         y_org = y_org.cuda(args.gpu)
         x_ref_idx = x_ref_idx.cuda(args.gpu)
 
+        # x_ref 打乱顺序后的样本
         x_ref = x_org.clone()
         x_ref = x_ref[x_ref_idx]
 
@@ -73,8 +106,10 @@ def trainGAN(data_loader, networks, opts, epoch, args, additional):
         # BEGIN Train GANs #
         ####################
         with torch.no_grad():
+            # y_ref 打乱顺序后的标签
             y_ref = y_org.clone()
             y_ref = y_ref[x_ref_idx]
+
             s_ref = C.moco(x_ref)
             c_src, skip1, skip2 = G.cnt_encoder(x_org)
             x_fake, _ = G.decode(c_src, s_ref, skip1, skip2)
