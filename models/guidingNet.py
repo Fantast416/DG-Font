@@ -15,12 +15,14 @@ cfg = {
     'vgg19cut': [64, 64, 'M', 128, 128, 'M', 256, 256, 256, 256, 'M', 512, 512, 512, 512, 'M', 512, 512, 512, 512, 'N'],
 }
 
-# StyleEncoder
+# StyleEncoder / 判别器输出层  其有两个作用
 class GuidingNet(nn.Module):
     def __init__(self, img_size=64, output_k={'cont': 128, 'disc': 10}):
+        # cont = sty_dim 用来控制输出的
+        # disc = output_k 用来控制输出的
         super(GuidingNet, self).__init__()
         # network layers setting
-        self.features = make_layers(cfg['vgg11'], True)
+        self.features = make_layers(cfg['vgg11'], True)  # 依据参数，构建相应卷积网络的模型
 
         self.disc = nn.Linear(512, output_k['disc'])
         self.cont = nn.Linear(512, output_k['cont'])

@@ -35,9 +35,9 @@ def trainGAN(data_loader, networks, opts, epoch, args, additional):
     moco_losses = AverageMeter()
 
     # set nets
-    D = networks['D']
-    G = networks['G'] if not args.distributed else networks['G'].module
-    C = networks['C'] if not args.distributed else networks['C'].module
+    D = networks['D']  # Discriminator类
+    G = networks['G'] if not args.distributed else networks['G'].module # Generator类
+    C = networks['C'] if not args.distributed else networks['C'].module # GuidingNet类
     G_EMA = networks['G_EMA'] if not args.distributed else networks['G_EMA'].module
     C_EMA = networks['C_EMA'] if not args.distributed else networks['C_EMA'].module
 
@@ -55,12 +55,11 @@ def trainGAN(data_loader, networks, opts, epoch, args, additional):
 
     logger = additional['logger']
 
-
     # summary writer
-    # dataloader本质上是一个可迭代对象，可以使用iter()进行访问，采用iter(dataloader)返回的是一个迭代器，然后可以使用next()访问。返回的是一个批次的数据
+    # dataloader本质上是一个可迭代对象，可以使用iter()进行访问，采用iter(data_loader)返回的是一个迭代器，然后可以使用next()访问。返回的是一个批次的数据
     train_it = iter(data_loader)
 
-    # args.iters 为参数控制传入的 每个Epoch迭代梯度下降参数更新的次数
+    # args.iters 为参数控制传入的：每个Epoch迭代中，梯度下降参数更新的次数
     t_train = trange(0, args.iters, initial=0, total=args.iters)
 
     # trange 同python中的range,区别在于trange在循环执行的时候会输出打印进度条,最后的 5.00s/it 代表每次循环耗时5s
@@ -74,7 +73,6 @@ def trainGAN(data_loader, networks, opts, epoch, args, additional):
     100%|████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:15<00:00,  5.01s/it]
     ————————————————
     """
-
     for i in t_train: # 最外层循环
         try:
             imgs, y_org = next(train_it)  # 获取一个Batch的数据
@@ -84,7 +82,7 @@ def trainGAN(data_loader, networks, opts, epoch, args, additional):
 
         x_org = imgs
 
-        # x_org 原始样本 y_org 原始标签
+        # x_org： 原始样本 作为Content Image  y_org： x_org 对应的类别标签
         # x_org.size() : [B,C,W,H]  BatchSize,Channel,Width,Height
         # x_org.size(0) = BatchSize
 
@@ -96,7 +94,7 @@ def trainGAN(data_loader, networks, opts, epoch, args, additional):
         y_org = y_org.cuda(args.gpu)
         x_ref_idx = x_ref_idx.cuda(args.gpu)
 
-        # x_ref 打乱顺序后的样本
+        # x_ref 打乱顺序后的样本，作为参考图像即 Style Image
         x_ref = x_org.clone()
         x_ref = x_ref[x_ref_idx]
 
@@ -105,42 +103,57 @@ def trainGAN(data_loader, networks, opts, epoch, args, additional):
         ####################
         # BEGIN Train GANs #
         ####################
-        with torch.no_grad():
-            # y_ref 打乱顺序后的标签
+
+        # Train D
+        with torch.no_grad():  # 以下操作不需要计算梯度，原因是在GAN的训练过程中，我们先固定G，训练D的参数，此步是在做生成
+            # y_ref:  x_ref 对应的类别标签
             y_ref = y_org.clone()
             y_ref = y_ref[x_ref_idx]
 
-            s_ref = C.moco(x_ref)
-            c_src, skip1, skip2 = G.cnt_encoder(x_org)
-            x_fake, _ = G.decode(c_src, s_ref, skip1, skip2)
+            s_ref = C.moco(x_ref)  # 对Style Image经过GuidingNet得到 Zs向量
+            c_src, skip1, skip2 = G.cnt_encoder(x_org) # 对Content Image经过Content Encoder得到 Zc,skip1,skip2
+            x_fake, _ = G.decode(c_src, s_ref, skip1, skip2) # 将Zc,Zs,skip1,skip2输入G的decode函数，得到 生成的输出图像
+            # 注意：x_fake图像的内容应当是x_org(Content Image)的，而风格应当是x_ref(Style Image)的
 
-        x_ref.requires_grad_()
+        x_ref.requires_grad_() # 接下来进入D的参数训练，所以x_ref(即StyleImage)需要在计算中保留对应的梯度信息
 
-        d_real_logit, _ = D(x_ref, y_ref)
-        d_fake_logit, _ = D(x_fake.detach(), y_ref)
+        d_real_logit, _ = D(x_ref, y_ref) # 将 StyleImage 和 对应的真实类别标签 输入判别器，得到一个logit分数 d_real_logit
 
+        d_fake_logit, _ = D(x_fake.detach(), y_ref) # 将生成的输出图像 和 x_ref(Style Image)对应的真实类别标签 输入判别器，得到一个logit分数 d_fake_logit
+
+        # .detach() 会返回一个新的tensor，从当前计算图中分离下来的，但是仍指向原变量的存放位置,
+        # 不同之处只是requires_grad为false，得到的这个tensor永远不需要计算其梯度，不具有grad。
+
+        # d_real_logit [B] 一维向量, 每个值就是 判别器给 输入样本 针对输入的y_ref类别打的分
+        # d_fake_logit [B] 一维向量, 每个值就是 判别器给 输入样本 针对输入的y_ref类别打的分
+
+        # 计算损失d_loss，由两部分组成： d_adv(生成对抗网络损失) 和 d_gp()
         d_adv_real = calc_adv_loss(d_real_logit, 'd_real')
         d_adv_fake = calc_adv_loss(d_fake_logit, 'd_fake')
 
         d_adv = d_adv_real + d_adv_fake
 
-        d_gp = args.w_gp * compute_grad_gp(d_real_logit, x_ref, is_patch=False)
+        d_gp = args.w_gp * compute_grad_gp(d_real_logit, x_ref, is_patch=False) # 这部分损失函数是？
 
         d_loss = d_adv + d_gp
 
-        d_opt.zero_grad()
-        d_adv_real.backward(retain_graph=True)
-        d_gp.backward()
-        d_adv_fake.backward()
+        d_opt.zero_grad()  # 优化器清零梯度
+
+        d_adv_real.backward(retain_graph=True) # 损失反向传播，计算梯度
+        d_gp.backward()  # 损失反向传播，计算梯度
+        d_adv_fake.backward()  # 损失反向传播，计算梯度
         if args.distributed:
             average_gradients(D)
-        d_opt.step()
 
-        # Train G
-        s_src = C.moco(x_org)
-        s_ref = C.moco(x_ref)
+        d_opt.step()  # 使用optimizer更新一步判别器的参数
 
+        # Train G 固定D的参数，训练G
+        s_src = C.moco(x_org) # 将ContentImage输入得到 x_org的风格特征向量 Zs_src
+        s_ref = C.moco(x_ref) # 将StyleImage输入得到 x_ref的风格特征向量 Zs_ref (Zs)
+
+        # 将ContentImage输入Content Encoder，得到 Zc,skip1,skip2
         c_src, skip1, skip2 = G.cnt_encoder(x_org)
+        # 输入Zc,Zs,skip1,skip2,得到 x_ref风格，x_org内容的 生成图像 x_fake, 以及 offset_loss
         x_fake, offset_loss = G.decode(c_src, s_ref, skip1, skip2)
         x_rec, _ = G.decode(c_src, s_src, skip1, skip2)
 

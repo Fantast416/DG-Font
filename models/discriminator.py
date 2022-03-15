@@ -12,9 +12,14 @@ except:
     from blocks import FRN, ActFirstResBlk
 
 
-class Discriminator(nn.Module):
+class Discriminator(nn.Module): # 多风格判别器，接受图像和domain类别信息，返回logit值
     """Discriminator: (image x, domain y) -> (logit out)."""
     def __init__(self, image_size=256, num_domains=2, max_conv_dim=1024):
+        """
+        :param image_size: 输入图像的大小
+        :param num_domains: 总共有多少类别
+        :param max_conv_dim:
+        """
         super(Discriminator, self).__init__()
         dim_in = 64 if image_size < 256 else 32
         blocks = []

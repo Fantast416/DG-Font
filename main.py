@@ -73,7 +73,7 @@ parser.add_argument('--port', default='8993', type=str)
 
 parser.add_argument('--iid_mode', default='iid+', type=str, choices=['iid', 'iid+'])
 
-parser.add_argument('--w_gp', default=10.0, type=float, help='Coefficient of GP of D')
+parser.add_argument('--w_gp', default=10.0, type=float, help='Coefficient of GP of D') # 训练判别器时候GP的权重系数
 parser.add_argument('--w_rec', default=0.1, type=float, help='Coefficient of Rec. loss of G')
 parser.add_argument('--w_adv', default=1.0, type=float, help='Coefficient of Adv. loss of G')
 parser.add_argument('--w_vec', default=0.01, type=float, help='Coefficient of Style vector rec. loss of G')
@@ -98,7 +98,6 @@ def main():
     # unsup_start : train networks with supervised data only before unsup_start
     # separated : train IIC only until epoch = args.separated
     # ema_start : Apply EMA to Generator after args.ema_start
-
 
     args.unsup_start = 0
     args.separated = 0
