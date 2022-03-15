@@ -78,10 +78,10 @@ class Generator(nn.Module):
         self.adaptive_param_assign(adapt_params, self.decoder)  # 将DECODER中的ADAIN2D模块的参数进行赋值
 
         # 得到输出，将内容图像、skip1、skip2通过Decoder的Forward，得到输出
-        out = self.decoder(cnt, skip1, skip2) # out : [B,3,H,W]
+        out, offset_loss = self.decoder(cnt, skip1, skip2) # out : [B,3,H,W]
         # print(f"out[0].shape:{out[0].shape}")
 
-        return out
+        return out, offset_loss
 
     def _initialize_weights(self, mode='fan_in'):
 

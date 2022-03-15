@@ -105,7 +105,7 @@ def trainGAN(data_loader, networks, opts, epoch, args, additional):
         ####################
 
         # Train D
-        with torch.no_grad():  # 以下操作不需要计算梯度，原因是在GAN的训练过程中，我们先固定G，训练D的参数，此步是在做生成
+        with torch.no_grad():  # 以下操作不需要计算梯度，原因是在GAN的训练过程中，我们先固定G，训练D的参数，此步是在做生成，也就是G的操作部分
             # y_ref:  x_ref 对应的类别标签
             y_ref = y_org.clone()
             y_ref = y_ref[x_ref_idx]
@@ -155,31 +155,43 @@ def trainGAN(data_loader, networks, opts, epoch, args, additional):
         c_src, skip1, skip2 = G.cnt_encoder(x_org)
         # 输入Zc,Zs,skip1,skip2,得到 x_ref风格，x_org内容的 生成图像 x_fake, 以及 offset_loss
         x_fake, offset_loss = G.decode(c_src, s_ref, skip1, skip2)
+        # 输入Zc,Zs_src,skip1,skip2,得到 x_org风格，x_org内容的 生成图像 x_rec
         x_rec, _ = G.decode(c_src, s_src, skip1, skip2)
 
+        # 将 x_ref风格，x_org内容的 生成图像 x_fake ， 以及 y_ref风格类别交给判别器，得到g_fake_logit
+        # 我们希望这个值越大越好,代表其骗过了生成器，泛化能力抢了
         g_fake_logit, _ = D(x_fake, y_ref)
+        # 将 x_org风格，x_org内容的 生成图像 x_rec， 以及 y_org风格类别交给判别器，g_rec_logit
+        # 我们希望这个值越大越好，代表生成器重建原图像能力强了
         g_rec_logit, _ = D(x_rec, y_org)
 
         g_adv_fake = calc_adv_loss(g_fake_logit, 'g')
         g_adv_rec = calc_adv_loss(g_rec_logit, 'g')
 
+        # 对抗生成损失计算，两者的和
         g_adv = g_adv_fake + g_adv_rec
 
+        # 计算图像重建损失，输入为 重建图像 x_rec 和 原图像 x_org，我们希望两者差距越小越好
         g_imgrec = calc_recon_loss(x_rec, x_org)
 
-        c_x_fake, _, _ = G.cnt_encoder(x_fake)
-        g_conrec = calc_recon_loss(c_x_fake, c_src)
+        # 计算内容一致性损失，即Content Consistency Loss，，我们希望两者差距越小越好
+        # 其实就是在计算，x_org和x_fake转换到内容空间中后，向量的一致性。其表现了ContentEncoder能够保留内容结构的能力
+        c_x_fake, _, _ = G.cnt_encoder(x_fake) # 将x_fake 输入Content Encoder，得到 c_x_fake 即Zc
+        g_conrec = calc_recon_loss(c_x_fake, c_src) # 计算 x_org得到的Zc 和 x_fake得到的Zc 的差别
 
-        g_loss = args.w_adv * g_adv + args.w_rec * g_imgrec +args.w_rec * g_conrec + args.w_off * offset_loss
+        # 总损失函数，与论文一致，有四项组成：对抗损失，图像重建损失，内容一致性损失，变形偏差损失
+        g_loss = args.w_adv * g_adv + args.w_rec * g_imgrec + args.w_rec * g_conrec + args.w_off * offset_loss
  
         g_opt.zero_grad()
         c_opt.zero_grad()
-        g_loss.backward()
+        g_loss.backward()  # 损失反向传播，计算梯度
+
         if args.distributed:
             average_gradients(G)
             average_gradients(C)
-        c_opt.step()
-        g_opt.step()
+
+        c_opt.step()  # 更新 C 的参数
+        g_opt.step()  # 更新 G 的参数
 
         ##################
         # END Train GANs #
