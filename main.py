@@ -18,6 +18,8 @@ from models.generator import Generator as Generator
 from models.discriminator import Discriminator as Discriminator
 from models.guidingNet import GuidingNet
 from models.inception import InceptionV3
+import models.transformer as transformer
+import models.StyTR  as StyTR
 
 from train.train import trainGAN
 
@@ -43,15 +45,15 @@ parser.add_argument('--epochs', default=250, type=int, help='Total number of epo
 parser.add_argument('--iters', default=1000, type=int, help='Total number of iterations per epoch')
 parser.add_argument('--batch_size', default=32, type=int,
                     help='Batch size for training')
-parser.add_argument('--val_num', default=190, type=int,help='Number of test images for each style')
+parser.add_argument('--val_num', default=10, type=int,help='Number of test images for each style')
 parser.add_argument('--val_batch', default=10, type=int,
                     help='Batch size for validation. '
                          'The result images are stored in the form of (val_batch, val_batch) grid.')
 parser.add_argument('--log_step', default=100, type=int)
 
 parser.add_argument('--sty_dim', default=128, type=int, help='The size of style vector')  # 字体风格向量的大小——Zs的维度
-parser.add_argument('--output_k', default=9, type=int, help='Total number of classes to use')
-parser.add_argument('--img_size', default=40, type=int, help='Input image size')
+parser.add_argument('--output_k', default=30, type=int, help='Total number of classes to use')
+parser.add_argument('--img_size', default=80, type=int, help='Input image size')
 parser.add_argument('--dims', default=2048, type=int, help='Inception dims for FID')
 
 parser.add_argument('--load_model', default=None, type=str, metavar='PATH',
@@ -76,8 +78,7 @@ parser.add_argument('--iid_mode', default='iid+', type=str, choices=['iid', 'iid
 parser.add_argument('--w_gp', default=10.0, type=float, help='Coefficient of GP of D') # 训练判别器时候GP的权重系数
 parser.add_argument('--w_rec', default=0.1, type=float, help='Coefficient of Rec. loss of G')
 parser.add_argument('--w_adv', default=1.0, type=float, help='Coefficient of Adv. loss of G')
-parser.add_argument('--w_vec', default=0.01, type=float, help='Coefficient of Style vector rec. loss of G')
-parser.add_argument('--w_off', default=0.5, type=float, help='Coefficient of offset normalization. loss of G')
+parser.add_argument('--w_cont', default=0.1, type=float, help='Coefficient of Style vector rec. loss of G')
 
 
 def main():
@@ -221,11 +222,11 @@ def main_worker(gpu, ngpus_per_node, args):
 
     # build model - return dict
     # 实例化网络及优化器对象，以字典形式返回
-    # networks为所有的网络，包含C、C_EMA、D、G
+    # networks为所有的网络，包含D、G、G_EMA
     # opts为对应的优化器，也包含上述内容
     networks, opts = build_model(args)
 
-    # 如果指定要加载模型的话，就执行load_model函数
+    # 如果指定要加载模型的话，就执行load_model函数，todo 未修改
     if args.load_model is not None:
         load_model(args, networks, opts)
 
@@ -297,24 +298,26 @@ def build_model(args):
     :param args: 传入的初始化参数
     :return: networks,opts 均为字典对象，networks为所有的网络，包含C、C_EMA、D、G，opts为对应的优化器
     """
-    args.to_train = 'CDG'  # 可以调整需要训练的模块
+    args.to_train = 'DG'  # 可以调整需要训练的模块
 
     networks = {}  # 所有的网络 以 字典的形式存储
     opts = {}  # 所有的优化器 以 字典的形式存储
 
+    decoder = StyTR.decoder
+    embedding = StyTR.PatchEmbed()
+    Trans = transformer.Transformer()
+
     # cont => content  disc => discriminator
     # sty_dim => 字体风格向量的大小——Zs的维度
     # output_k => 训练集中字体风格种类的数量，即交给判别器需要判定的风格数量种类
-    if 'C' in args.to_train:
-        networks['C'] = GuidingNet(args.img_size, {'cont': args.sty_dim, 'disc': args.output_k})
-        networks['C_EMA'] = GuidingNet(args.img_size, {'cont': args.sty_dim, 'disc': args.output_k})
+
     # 多风格判别器：num_domains表示需要判定的风格的数量
     if 'D' in args.to_train:
         networks['D'] = Discriminator(args.img_size, num_domains=args.output_k)
     # 生成器：
     if 'G' in args.to_train:
-        networks['G'] = Generator(args.img_size, args.sty_dim, use_sn=False)
-        networks['G_EMA'] = Generator(args.img_size, args.sty_dim, use_sn=False)
+        networks['G'] = StyTR.StyTrans(decoder,embedding, Trans,args)
+        networks['G_EMA'] = StyTR.StyTrans(decoder,embedding, Trans,args)
 
     # 第一遍阅读代码，暂时先不考虑分布式训练的内容
     if args.distributed:
@@ -343,25 +346,24 @@ def build_model(args):
         for name, net in networks.items():
             networks[name] = torch.nn.DataParallel(net).cuda()
 
-    if 'C' in args.to_train:
-        opts['C'] = torch.optim.Adam(
-            networks['C'].module.parameters() if args.distributed else networks['C'].parameters(),
-            1e-4, weight_decay=0.001)
-
-        if args.distributed:
-            networks['C_EMA'].module.load_state_dict(networks['C'].module.state_dict())
-        else:
-            networks['C_EMA'].load_state_dict(networks['C'].state_dict())
-
     if 'D' in args.to_train:
         opts['D'] = torch.optim.RMSprop(
             networks['D'].module.parameters() if args.distributed else networks['D'].parameters(),
             1e-4, weight_decay=0.0001)
 
     if 'G' in args.to_train:
-        opts['G'] = torch.optim.RMSprop(
-            networks['G'].module.parameters() if args.distributed else networks['G'].parameters(),
-            1e-4, weight_decay=0.0001)
+        if args.distributed:
+            opts['G'] = torch.optim.Adam([
+                {'params': networks['G'].module.transformer.parameters()},
+                {'params': networks['G'].module.decode.parameters()},
+                {'params': networks['G'].module.embedding.parameters()},
+            ], lr=1e-4)
+        else:
+            opts['G'] = torch.optim.Adam([
+                {'params': networks['G'].transformer.parameters()},
+                {'params': networks['G'].decode.parameters()},
+                {'params': networks['G'].embedding.parameters()},
+            ], lr=1e-4)
 
     return networks, opts
 

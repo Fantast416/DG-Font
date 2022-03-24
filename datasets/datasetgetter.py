@@ -72,7 +72,7 @@ def get_dataset(args):
     # 构造验证用数据集：该验证用数据集到目前为止和上一行构造的数据集无任何差别，只是之后作用不同
     dataset_val = ImageFolerRemap(img_dir, transform=transform_val, remap_table=remap_table)
 
-    print("dataset.targets:",dataset.targets)
+    # print("dataset.targets:",dataset.targets)
 
     # parse classes to use 将标签转换为Tensor类型的对象
     tot_targets = torch.tensor(dataset.targets)

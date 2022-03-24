@@ -7,7 +7,7 @@ import torch.utils.data.distributed
 from tools.utils import *
 from tools.ops import compute_grad_gp, update_average, copy_norm_params, queue_data, dequeue_data, \
     average_gradients, calc_adv_loss, calc_contrastive_loss, calc_recon_loss
-
+from torchvision.utils import save_image
 
 def trainGAN(data_loader, networks, opts, epoch, args, additional):
     """
@@ -30,34 +30,28 @@ def trainGAN(data_loader, networks, opts, epoch, args, additional):
     g_losses = AverageMeter()
     g_advs = AverageMeter()
     g_imgrecs = AverageMeter()
-    g_rec = AverageMeter()
-
-    moco_losses = AverageMeter()
+    g_cont = AverageMeter()
 
     # set nets
     D = networks['D']  # Discriminator类
     G = networks['G'] if not args.distributed else networks['G'].module # Generator类
-    C = networks['C'] if not args.distributed else networks['C'].module # GuidingNet类
     G_EMA = networks['G_EMA'] if not args.distributed else networks['G_EMA'].module # EMA（Exponential Moving Average）是指数移动平均值，用于训练
-    C_EMA = networks['C_EMA'] if not args.distributed else networks['C_EMA'].module
 
     # set opts
     d_opt = opts['D']
     g_opt = opts['G']
-    c_opt = opts['C']
 
     # switch to train mode
     D.train()
     G.train()
-    C.train()
-    C_EMA.train()
     G_EMA.train()
 
     logger = additional['logger']
 
     # summary writer
     # dataloader本质上是一个可迭代对象，可以使用iter()进行访问，采用iter(data_loader)返回的是一个迭代器，然后可以使用next()访问。返回的是一个批次的数据
-    train_it = iter(data_loader)
+
+    train_iter = iter(data_loader)
 
     # args.iters 为参数控制传入的：每个Epoch迭代中，梯度下降参数更新的次数
     t_train = trange(0, args.iters, initial=0, total=args.iters)
@@ -75,10 +69,10 @@ def trainGAN(data_loader, networks, opts, epoch, args, additional):
     """
     for i in t_train: # 最外层循环
         try:
-            imgs, y_org = next(train_it)  # 获取一个Batch的数据
+            imgs, y_org = next(train_iter)  # 获取一个Batch的数据
         except:
-            train_it = iter(data_loader)
-            imgs, y_org = next(train_it)
+            train_iter = iter(data_loader)
+            imgs, y_org = next(train_iter)
 
         x_org = imgs
 
@@ -98,6 +92,11 @@ def trainGAN(data_loader, networks, opts, epoch, args, additional):
         x_ref = x_org.clone()
         x_ref = x_ref[x_ref_idx]
 
+        # x_org : Content_Images
+        # x_ref : Style_Images
+        # print("content_images", x_org.size())  # [B,C,H,W] [8,3,80,80]
+        # print("style_images", x_ref.size())
+
         training_mode = 'GAN'
 
         ####################
@@ -110,9 +109,7 @@ def trainGAN(data_loader, networks, opts, epoch, args, additional):
             y_ref = y_org.clone()
             y_ref = y_ref[x_ref_idx]
 
-            s_ref = C.moco(x_ref)  # 对Style Image经过GuidingNet得到 Zs向量
-            c_src, skip1, skip2 = G.cnt_encoder(x_org) # 对Content Image经过Content Encoder得到 Zc,skip1,skip2
-            x_fake, _ = G.decode(c_src, s_ref, skip1, skip2) # 将Zc,Zs,skip1,skip2输入G的decode函数，得到 生成的输出图像
+            x_fake, _, _, _, _ = G(x_org, x_ref)
             # 注意：x_fake图像的内容应当是x_org(Content Image)的，而风格应当是x_ref(Style Image)的
 
         x_ref.requires_grad_() # 接下来进入D的参数训练，所以x_ref(即StyleImage)需要在计算中保留对应的梯度信息
@@ -147,22 +144,22 @@ def trainGAN(data_loader, networks, opts, epoch, args, additional):
 
         d_opt.step()  # 使用optimizer更新一步判别器的参数
 
-        # Train G 固定D的参数，训练G
-        s_src = C.moco(x_org) # 将ContentImage输入得到 x_org的风格特征向量 Zs_src
-        s_ref = C.moco(x_ref) # 将StyleImage输入得到 x_ref的风格特征向量 Zs_ref (Zs)
+        # Train G:
+        # 固定D的参数，训练G
+        # 生成图像 x_fake
+        x_fake, Icc, Iss, x_org_Zc, x_fake_Zc = G(x_org, x_ref)
 
-        # 将ContentImage输入Content Encoder，得到 Zc,skip1,skip2
-        c_src, skip1, skip2 = G.cnt_encoder(x_org)
-        # 输入Zc,Zs,skip1,skip2,得到 x_ref风格，x_org内容的 生成图像 x_fake, 以及 offset_loss
-        x_fake, offset_loss = G.decode(c_src, s_ref, skip1, skip2)
-        # 输入Zc,Zs_src,skip1,skip2,得到 x_org风格，x_org内容的 生成图像 x_rec
-        x_rec, _ = G.decode(c_src, s_src, skip1, skip2)
+        # 计算Content Consistency Loss
+        loss_c = calc_recon_loss(x_fake_Zc, x_org_Zc)
+
+        # 计算对抗生成损失
 
         # 将 x_ref风格，x_org内容的 生成图像 x_fake ， 以及 y_ref风格类别交给判别器，得到g_fake_logit
-        # 我们希望这个值越大越好,代表其骗过了生成器，泛化能力抢了
+        # 我们希望这个值越大越好,代表其骗过了生成器，泛化能力强了
         g_fake_logit, _ = D(x_fake, y_ref)
         # 将 x_org风格，x_org内容的 生成图像 x_rec， 以及 y_org风格类别交给判别器，g_rec_logit
         # 我们希望这个值越大越好，代表生成器重建原图像能力强了
+        x_rec, _, _, _, _ = G(x_org, x_org)
         g_rec_logit, _ = D(x_rec, y_org)
 
         g_adv_fake = calc_adv_loss(g_fake_logit, 'g')
@@ -171,26 +168,34 @@ def trainGAN(data_loader, networks, opts, epoch, args, additional):
         # 对抗生成损失计算，两者的和
         g_adv = g_adv_fake + g_adv_rec
 
-        # 计算图像重建损失，输入为 重建图像 x_rec 和 原图像 x_org，我们希望两者差距越小越好
-        g_imgrec = calc_recon_loss(x_rec, x_org)
+        # 计算图像重建损失(StyTR-2版)
+        # loss_rec = G.module.calc_content_loss(Icc, x_org) + G.module.calc_content_loss(Iss, x_ref)
 
-        # 计算内容一致性损失，即Content Consistency Loss，，我们希望两者差距越小越好
-        # 其实就是在计算，x_org和x_fake转换到内容空间中后，向量的一致性。其表现了ContentEncoder能够保留内容结构的能力
-        c_x_fake, _, _ = G.cnt_encoder(x_fake) # 将x_fake 输入Content Encoder，得到 c_x_fake 即Zc
-        g_conrec = calc_recon_loss(c_x_fake, c_src) # 计算 x_org得到的Zc 和 x_fake得到的Zc 的差别
+        # 计算图像重建损失，输入为 重建图像 x_rec 和 原图像 x_org，我们希望两者差距越小越好（DG-Font版）
+        loss_rec = calc_recon_loss(x_rec, x_org)
 
-        # 总损失函数，与论文一致，有四项组成：对抗损失，图像重建损失，内容一致性损失，变形偏差损失
-        g_loss = args.w_adv * g_adv + args.w_rec * g_imgrec + args.w_rec * g_conrec + args.w_off * offset_loss
- 
+        # 总损失函数，与论文一致，有四项组成：对抗损失，图像重建损失，内容一致性损失
+        g_loss = args.w_adv * g_adv + args.w_rec * loss_rec + args.w_cont * loss_c
+
+
+        if i % 100 == 0:
+            if not os.path.exists(args.res_dir + "/test"):
+                os.makedirs(args.res_dir + "/test")
+
+            output_name = '{:s}/test/{:s}{:s}'.format(
+                args.res_dir, str(i), ".jpg"
+            )
+            x_fake = torch.cat((x_org, x_fake), 0)
+            x_fake = torch.cat((x_ref, x_fake), 0)
+            # print("x_fake.size()", x_fake.size())
+            save_image(x_fake, output_name, nrow=args.batch_size)
+
         g_opt.zero_grad()
-        c_opt.zero_grad()
         g_loss.backward()  # 损失反向传播，计算梯度
 
         if args.distributed:
             average_gradients(G)
-            average_gradients(C)
 
-        c_opt.step()  # 更新 C 的参数
         g_opt.step()  # 更新 G 的参数
 
         ##################
@@ -201,7 +206,6 @@ def trainGAN(data_loader, networks, opts, epoch, args, additional):
         if epoch >= args.ema_start:
             training_mode = training_mode + "_EMA"
             update_average(G_EMA, G)
-        update_average(C_EMA, C)
 
         torch.cuda.synchronize()
 
@@ -213,10 +217,9 @@ def trainGAN(data_loader, networks, opts, epoch, args, additional):
 
                 g_losses.update(g_loss.item(), x_org.size(0))
                 g_advs.update(g_adv.item(), x_org.size(0))
-                g_imgrecs.update(g_imgrec.item(), x_org.size(0))
-                g_rec.update(g_conrec.item(), x_org.size(0))
+                g_imgrecs.update(loss_rec.item(), x_org.size(0))
+                g_cont.update(loss_c.item(), x_org.size(0))
 
-                moco_losses.update(offset_loss.item(), x_org.size(0))
 
             if (i + 1) % args.log_step == 0 and (args.gpu == 0 or args.gpu == '0'):
                 summary_step = epoch * args.iters + i
@@ -227,13 +230,10 @@ def trainGAN(data_loader, networks, opts, epoch, args, additional):
                 add_logs(args, logger, 'G/LOSS', g_losses.avg, summary_step)
                 add_logs(args, logger, 'G/ADV', g_advs.avg, summary_step)
                 add_logs(args, logger, 'G/IMGREC', g_imgrecs.avg, summary_step)
-                add_logs(args, logger, 'G/conrec', g_rec.avg, summary_step)
-
-                add_logs(args, logger, 'C/OFFSET', moco_losses.avg, summary_step)
+                add_logs(args, logger, 'G/CONT', g_cont.avg, summary_step)
 
                 print('Epoch: [{}/{}] [{}/{}] MODE[{}] Avg Loss: D[{d_losses.avg:.2f}] G[{g_losses.avg:.2f}] '.format(epoch + 1, args.epochs, i+1, args.iters,
                                                         training_mode, d_losses=d_losses, g_losses=g_losses))
 
     copy_norm_params(G_EMA, G)
-    copy_norm_params(C_EMA, C)
 

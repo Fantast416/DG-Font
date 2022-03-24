@@ -24,14 +24,10 @@ def validateUN(data_loader, networks, epoch, args, additional=None):
     # set nets
     D = networks['D']
     G = networks['G'] if not args.distributed else networks['G'].module
-    C = networks['C'] if not args.distributed else networks['C'].module
-    C_EMA = networks['C_EMA'] if not args.distributed else networks['C_EMA'].module
     G_EMA = networks['G_EMA'] if not args.distributed else networks['G_EMA'].module
     # switch to train mode
     D.eval()
     G.eval()
-    C.eval()
-    C_EMA.eval()
     G_EMA.eval()
     # data loader
     val_dataset = data_loader['TRAINSET']
