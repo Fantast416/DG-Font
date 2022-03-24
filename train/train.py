@@ -38,7 +38,7 @@ def trainGAN(data_loader, networks, opts, epoch, args, additional):
     D = networks['D']  # Discriminator类
     G = networks['G'] if not args.distributed else networks['G'].module # Generator类
     C = networks['C'] if not args.distributed else networks['C'].module # GuidingNet类
-    G_EMA = networks['G_EMA'] if not args.distributed else networks['G_EMA'].module
+    G_EMA = networks['G_EMA'] if not args.distributed else networks['G_EMA'].module # EMA（Exponential Moving Average）是指数移动平均值，用于训练
     C_EMA = networks['C_EMA'] if not args.distributed else networks['C_EMA'].module
 
     # set opts
@@ -133,7 +133,7 @@ def trainGAN(data_loader, networks, opts, epoch, args, additional):
 
         d_adv = d_adv_real + d_adv_fake
 
-        d_gp = args.w_gp * compute_grad_gp(d_real_logit, x_ref, is_patch=False) # 这部分损失函数是？
+        d_gp = args.w_gp * compute_grad_gp(d_real_logit, x_ref, is_patch=False) # 这部分损失函数是 Gradient penalty （WGAN提出的训练GAN的改进方法）
 
         d_loss = d_adv + d_gp
 

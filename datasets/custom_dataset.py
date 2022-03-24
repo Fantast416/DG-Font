@@ -35,7 +35,6 @@ def is_image_file(filename):
 
 def make_dataset(dir, class_to_idx, extensions):
     """
-
     :param dir: 字符串 根目录
     :param class_to_idx: 字典 示例： {'id_0': 0, 'id_1': 1, 'id_2': 2, 'id_3': 3, 'id_4': 4, 'id_5': 5, 'id_6': 6, 'id_7': 7, 'id_8': 8}
     :param extensions: 数组，需要关注的文件的扩展名列表

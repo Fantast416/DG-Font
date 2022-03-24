@@ -33,7 +33,8 @@ def get_dataset(args):
 
     :param args:
     :return: train_dataset,val_dataset
-    train_dataset : 如下所示的一个字典： {'TRAIN': tr_dataset, 'FULL': dataset}，
+    train_dataset : 如下所示的一个字典：
+    {'TRAIN': tr_dataset, 'FULL': dataset}，
     val_dataset : val_dataset
     其中： tr_dataset,dataset,val_dataset 都是 pytorch 的 数据集Dataset对象
     """
